@@ -21,4 +21,4 @@ jobs:
         with:
           context: .
           push: true
-          tags: ghcr.io/geethcodes/rnaseq-r:1.0.0
+          tags: ghcr.io/geethcodes/rnaseq-r:1.1.0
