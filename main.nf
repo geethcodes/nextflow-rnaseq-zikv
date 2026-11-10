@@ -5,7 +5,7 @@ params.samplesheet = "metadata/samplesheet.csv"
 process DOWNLOAD_SRA {
 
     tag "$sample"
-    publishDir "${projectDir}/data/raw/SRA", mode: 'copy'
+    container 'quay.io/biocontainers/sra-tools:3.0.8--h9f5acd7_0'
     input:
     tuple val(sample), val(accession)
 
@@ -20,7 +20,8 @@ process DOWNLOAD_SRA {
 
 process SRA_TO_FASTQ {
    tag "$sample"
-   publishDir "${projectDir}/data/raw/FASTQ" , mode: 'copy'
+   
+   container 'quay.io/biocontainers/sra-tools:3.0.8--h9f5acd7_0'
    
    input:
    tuple val(sample), path(sra_dir)
@@ -37,7 +38,7 @@ process SRA_TO_FASTQ {
 
     fasterq-dump \
         --split-files \
-        --threads 4 \
+        --threads ${task.cpus}\
         --temp tmp \
         --outdir . \
         ${sra_dir}
@@ -46,6 +47,7 @@ process SRA_TO_FASTQ {
 
  process FASTQC {
    tag "$sample"
+   container 'quay.io/biocontainers/fastqc:0.12.1--hdfd78af_0'
    publishDir "${projectDir}/results/fastqc", mode: 'copy'
 
    input:
@@ -69,6 +71,8 @@ tuple val(sample),
 process FASTP {
 
     tag "$sample"
+
+     container 'quay.io/biocontainers/fastp:0.23.4--h5f740d0_0'
 
     publishDir "${projectDir}/results/fastp", mode: 'copy'
 
@@ -101,7 +105,7 @@ process FASTP {
 process POST_TRIM_FASTQC {
 
     tag "$sample"
-
+    container 'quay.io/biocontainers/fastqc:0.12.1--hdfd78af_0'
     publishDir "${projectDir}/results/fastqc_trimmed", mode: 'copy'
 
     input:
@@ -125,10 +129,11 @@ process POST_TRIM_FASTQC {
 
 process SALMON_INDEX {
 
-    tag "Mouse transcriptome index"
+     tag "Mouse transcriptome index"
 
-    module 'gnu/12.2.0', 'salmon/1.10.1'
+    container 'quay.io/biocontainers/salmon:1.10.1--h7e5ed60_0'
 
+   
     publishDir "${projectDir}/results/salmon/index", mode: 'copy'
 
     input:
@@ -149,12 +154,13 @@ process SALMON_INDEX {
 
 process SALMON_QUANT {
 
-    tag "$sample"
+     tag "$sample"
 
-    module 'gnu/12.2.0', 'salmon/1.10.1'
+    container 'quay.io/biocontainers/salmon:1.10.1--h7e5ed60_0'
 
     publishDir "${projectDir}/results/salmon/quant", mode: 'copy'
 
+  
     input:
     tuple val(sample), path(read1), path(read2), path(index)
 
@@ -182,9 +188,9 @@ process TXIMPORT {
 
     tag "tximport"
 
-beforeScript 'export R_LIBS_USER=/N/slate/gkarutur/Rlibs'
-
     publishDir "${projectDir}/results/tximport", mode: 'copy'
+
+    container 'docker://ghcr.io/geethcodes/rnaseq-r:1.0.0'
 
     input:
     path quant_dirs
@@ -204,22 +210,20 @@ beforeScript 'export R_LIBS_USER=/N/slate/gkarutur/Rlibs'
 }
 
 
+
 process DESEQ2 {
 
-     tag "Differential expression: ZIKV vs PBS"
-
-    module 'gnu/14.2.0', 'r/4.5.1'
-
-    beforeScript 'export R_LIBS_USER=/N/slate/gkarutur/Rlibs'
+    tag "Differential expression: ZIKV vs PBS"
 
     publishDir "${projectDir}/results/deseq2", mode: 'copy'
+
+    container 'docker://ghcr.io/geethcodes/rnaseq-r:1.0.0'
 
     input:
     path txi_file
     path samplesheet
     path deseq2_script
 
-    
     output:
     path "DESeq2_results.csv", emit: deseq2_results
     path "volcano_plot.png", emit: volcano_plot
@@ -233,7 +237,29 @@ process DESEQ2 {
     """
 }
 
+process MULTIQC {
 
+    tag "MultiQC report"
+
+    container 'quay.io/biocontainers/multiqc:1.19--pyhdfd78af_0'
+
+    publishDir "${projectDir}/results/multiqc", mode: 'copy'
+
+    input:
+    path report_files
+
+    output:
+    path "multiqc_report.html", emit: multiqc_report
+    path "multiqc_report_data", emit: multiqc_data
+
+    script:
+    """
+    multiqc \
+        . \
+        --filename multiqc_report.html \
+        --outdir .
+    """
+}
   
 workflow {
 
@@ -271,6 +297,31 @@ salmon_input_ch = trimmed_fastq_ch
 // Run Salmon quantification
 SALMON_QUANT(salmon_input_ch)
 
+// Raw FastQC reports
+raw_fastqc_ch = FASTQC.out.fastqc_reports
+    .flatMap { sample, html, zip -> [html, zip] }
+
+// fastp reports
+fastp_reports_ch = FASTP.out.trimmed_reads
+    .flatMap { sample, read1, read2, html, json -> [html, json] }
+
+// Trimmed FastQC reports
+trimmed_fastqc_ch = POST_TRIM_FASTQC.out.trimmed_fastqc_reports
+    .flatMap { sample, html, zip -> [html, zip] }
+
+// Salmon quantification directories
+salmon_reports_ch = SALMON_QUANT.out.quant_results
+    .map { sample, quant_dir -> quant_dir }
+
+// Combine report streams
+multiqc_input_ch = raw_fastqc_ch
+    .mix(fastp_reports_ch)
+    .mix(trimmed_fastqc_ch)
+    .mix(salmon_reports_ch)
+    .collect()
+
+// Run MultiQC
+MULTIQC(multiqc_input_ch)
 
 // Collect all Salmon quantification directories
 quant_dirs_ch = SALMON_QUANT.out.quant_results
