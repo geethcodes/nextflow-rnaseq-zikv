@@ -1,148 +1,199 @@
 
-# Read command-line arguments
+# ==========================================
+# DESeq2: ZIKV versus PBS
+# ==========================================
+
 args <- commandArgs(trailingOnly = TRUE)
+
+if (length(args) != 3) {
+    stop("Usage: deseq2.R txi.rds samplesheet.csv output.csv")
+}
 
 txi_file <- args[1]
 samplesheet_file <- args[2]
 output_file <- args[3]
 
-.libPaths(c("/N/slate/gkarutur/Rlibs", .libPaths()))
 library(DESeq2)
+library(ggplot2)
 
+# ------------------------------------------
+# 1. Load tximport object
+# ------------------------------------------
 
-
-# Load tximport object
 txi <- readRDS(txi_file)
 
-# Read sample metadata
+# ------------------------------------------
+# 2. Read sample metadata
+# ------------------------------------------
+
 sample_info <- read.csv(
     samplesheet_file,
     stringsAsFactors = FALSE
 )
 
-# Keep only the columns needed for this comparison
-sample_info <- sample_info[, c("sample", "condition")]
+required_columns <- c("sample", "condition")
 
-# Set sample names as row names
+if (!all(required_columns %in% colnames(sample_info))) {
+    stop("Samplesheet must contain sample and condition columns")
+}
+
+sample_info <- sample_info[, required_columns]
+
+if (anyDuplicated(sample_info$sample)) {
+    stop("Duplicate sample names in samplesheet")
+}
+
+if (!all(sample_info$condition %in% c("PBS", "ZIKV"))) {
+    stop("Unexpected condition. Expected PBS or ZIKV.")
+}
+
 rownames(sample_info) <- sample_info$sample
 
-# Define reference condition
 sample_info$condition <- factor(
     sample_info$condition,
     levels = c("PBS", "ZIKV")
 )
 
-# Match metadata order to tximport count matrix
+# ------------------------------------------
+# 3. Match samples
+# ------------------------------------------
+
+count_samples <- colnames(txi$counts)
+metadata_samples <- rownames(sample_info)
+
+missing_metadata <- setdiff(count_samples, metadata_samples)
+extra_metadata <- setdiff(metadata_samples, count_samples)
+
+if (length(missing_metadata) > 0 ||
+    length(extra_metadata) > 0) {
+
+    stop(
+        "Sample mismatch!\n",
+        "Missing metadata: ",
+        paste(missing_metadata, collapse = ", "),
+        "\nExtra metadata: ",
+        paste(extra_metadata, collapse = ", ")
+    )
+}
+
 sample_info <- sample_info[
-    colnames(txi$counts),
+    count_samples,
     ,
     drop = FALSE
 ]
 
-# Check sample matching
-if (!identical(rownames(sample_info), colnames(txi$counts))) {
-    stop("Sample names do not match between tximport and metadata")
+stopifnot(
+    identical(rownames(sample_info), colnames(txi$counts))
+)
+
+if (any(table(sample_info$condition) < 2)) {
+    stop("At least two biological replicates per condition are required")
 }
 
-# Create DESeq2 dataset
+# ------------------------------------------
+# 4. Create DESeq2 dataset
+# ------------------------------------------
+
 dds <- DESeqDataSetFromTximport(
     txi,
     colData = sample_info,
     design = ~ condition
 )
 
-# Filter low-count genes
+# ------------------------------------------
+# 5. Filter low-count genes
+# ------------------------------------------
+
 keep <- rowSums(counts(dds) >= 10) >= 4
+
 dds <- dds[keep, ]
 
-# Run differential expression analysis
-dds <- DESeq(dds)
+cat("Genes retained after filtering:", nrow(dds), "\n")
 
-# Extract ZIKV versus PBS results
+# ------------------------------------------
+# 6. Differential expression analysis
+# ------------------------------------------
+
+dds <- DESeq(dds)
+saveRDS(dds, "dds.rds")
+
 res <- results(
     dds,
     contrast = c("condition", "ZIKV", "PBS")
 )
 
-# Convert results to data frame
+# ------------------------------------------
+# 7. Export results
+# ------------------------------------------
+
 res_df <- as.data.frame(res)
+
 res_df$gene_id <- rownames(res_df)
 
-# Sort by adjusted p-value
 res_df <- res_df[
     order(res_df$padj, na.last = TRUE),
 ]
 
-# Save results
 write.csv(
     res_df,
     output_file,
     row.names = FALSE
 )
 
+# ------------------------------------------
+# 8. Print analysis summary
+# ------------------------------------------
 
+significant <- !is.na(res_df$padj) &
+    res_df$padj < 0.05
 
+upregulated <- significant &
+    res_df$log2FoldChange > 0
 
-# Print summary
-cat("DESeq2 analysis completed\n")
+downregulated <- significant &
+    res_df$log2FoldChange < 0
+
+cat("\nDESeq2 analysis completed\n")
 cat("Samples:", ncol(dds), "\n")
 cat("Genes tested:", nrow(dds), "\n")
-cat(
-    "Significant genes (padj < 0.05):",
-    sum(res_df$padj < 0.05, na.rm = TRUE),
-    "\n"
-)
-cat(
-    "Upregulated:",
-    sum(res_df$padj < 0.05 &
-        res_df$log2FoldChange > 0, na.rm = TRUE),
-    "\n"
-)
-cat(
-    "Downregulated:",
-    sum(res_df$padj < 0.05 &
-        res_df$log2FoldChange < 0, na.rm = TRUE),
-    "\n"
-)
+cat("Significant genes:", sum(significant), "\n")
+cat("Upregulated:", sum(upregulated), "\n")
+cat("Downregulated:", sum(downregulated), "\n")
 
+# ------------------------------------------
+# 9. Volcano plot
+# ------------------------------------------
 
-# Create volcano plot
-library(ggplot2)
-
-## Define significance categories
 res_df$significance <- "Not significant"
 
-res_df$significance[
-    !is.na(res_df$padj) &
-    res_df$padj < 0.05 &
-    res_df$log2FoldChange > 0
-] <- "Upregulated"
+res_df$significance[upregulated] <- "Upregulated"
+res_df$significance[downregulated] <- "Downregulated"
 
-res_df$significance[
-    !is.na(res_df$padj) &
-    res_df$padj < 0.05 &
-    res_df$log2FoldChange < 0
-] <- "Downregulated"
-
-# Avoid infinite values when adjusted p-value is zero
 res_df$padj_plot <- pmax(
     res_df$padj,
-    .Machine$double.xmin,
-    na.rm = FALSE
+    .Machine$double.xmin
 )
 
-# Generate plot
 volcano <- ggplot(
     res_df,
-    aes(x = log2FoldChange, y = -log10(padj_plot),
-        color = significance)
+    aes(
+        x = log2FoldChange,
+        y = -log10(padj_plot),
+        color = significance
+    )
 ) +
-    geom_point(alpha = 0.65, size = 1.2, na.rm = TRUE) +
-    scale_color_manual(values = c(
-        "Upregulated" = "red",
-        "Downregulated" = "blue",
-        "Not significant" = "grey"
-    )) +
+    geom_point(
+        alpha = 0.65,
+        size = 1.2,
+        na.rm = TRUE
+    ) +
+    scale_color_manual(
+        values = c(
+            "Upregulated" = "red",
+            "Downregulated" = "blue",
+            "Not significant" = "grey"
+        )
+    ) +
     geom_vline(
         xintercept = c(-1, 1),
         linetype = "dashed"
@@ -159,7 +210,6 @@ volcano <- ggplot(
     ) +
     theme_classic()
 
-# Save plot
 ggsave(
     "volcano_plot.png",
     plot = volcano,
@@ -168,5 +218,5 @@ ggsave(
     dpi = 300
 )
 
-cat("Volcano plot saved: volcano_plot.png\n")
+cat("Volcano plot saved successfully\n")
 

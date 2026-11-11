@@ -227,6 +227,7 @@ process DESEQ2 {
     output:
     path "DESeq2_results.csv", emit: deseq2_results
     path "volcano_plot.png", emit: volcano_plot
+    path "dds.rds", emit: dds
 
     script:
     """
